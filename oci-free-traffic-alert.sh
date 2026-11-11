@@ -141,7 +141,9 @@ newer() {
 # deliver <상태이름|""> <키> <본문>
 #   상태이름이 있으면 채널마다 기록된 키보다 새 키가 newer 일 때만 보내고, 성공한 채널에만 키를 기록한다.
 #   → 한 채널이 실패해도 성공한 채널엔 다시 가지 않고, 실패한 채널만 다음 실행 때 재시도한다.
-#   상태를 기록할 수 없으면 보내지 않는다 (기록 못 한 채 보내면 매번 다시 보내게 됨).
+#   새 키는 임시 파일(<파일>.tmp)에 먼저 다 써 두고, 쓰기에 실패하면 보내지 않는다
+#   (기록 못 한 채 보내면 매번 다시 보내게 됨). 보낸 뒤에만 기존 파일과 원자적으로 교체하고,
+#   전송이 실패하면 임시 파일만 지운다 → 실패해도 기존 채널 기록과 첫 버전 state 승계가 그대로 남는다.
 #   첫 버전은 임계치 상태를 채널 구분 없이 STATE_DIR/state 에 같은 형식으로 남겼으므로,
 #   채널 파일이 아직 없으면 그 값을 이어받는다.
 deliver() {
@@ -152,14 +154,17 @@ deliver() {
       f="$STATE_DIR/$name.$ch" old=""
       if [[ -f "$f" ]]; then old=$(cat "$f"); elif [[ "$name" == level && -f "$STATE_DIR/state" ]]; then old=$(cat "$STATE_DIR/state"); fi
       newer "$key" "$old" || continue
-      if ! : 2>/dev/null >> "$f"; then echo "❌ 상태 파일에 쓸 수 없어 보내지 않습니다: $f" >&2; failed=1; continue; fi
+      if ! echo "$key" 2>/dev/null > "$f.tmp"; then
+        rm -f "$f.tmp" 2>/dev/null; echo "❌ 상태 파일에 쓸 수 없어 보내지 않습니다: $f.tmp" >&2; failed=1; continue
+      fi
     fi
     if "send_$ch" "$text"; then
-      if [[ -n "$name" ]] && ! echo "$key" 2>/dev/null > "$f"; then
-        echo "❌ $name → $ch 는 보냈지만 상태 기록 실패: $f (다음 실행 때 다시 보낼 수 있음)" >&2; failed=1; continue
+      if [[ -n "$name" ]] && ! mv -fT "$f.tmp" "$f" 2>/dev/null; then
+        rm -f "$f.tmp"; echo "❌ $name → $ch 는 보냈지만 상태 기록 실패: $f (다음 실행 때 다시 보낼 수 있음)" >&2; failed=1; continue
       fi
       echo "[$(date '+%F %T')] ${name:-report} → $ch 전송"
     else
+      if [[ -n "$name" ]]; then rm -f "$f.tmp"; fi
       echo "❌ ${name:-report} → $ch 전송 실패 (check 는 다음 실행 때 다시 시도)" >&2; failed=1
     fi
   done

@@ -12,13 +12,14 @@ cat > "$T/bin/vnstat" <<'EOF'
 #!/usr/bin/env bash
 cat "$FAKE_VNSTAT_JSON"
 EOF
-# 가짜 curl: 채널별로 호출을 기록. FAIL_TELEGRAM=1 이면 텔레그램 전송만 실패.
+# 가짜 curl: 채널별로 호출을 기록. FAIL_TELEGRAM=1 / FAIL_WEBHOOK=1 이면 그 채널 전송만 실패.
 cat > "$T/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$*" == *api.telegram.org* ]]; then
   [[ "${FAIL_TELEGRAM:-0}" == 1 ]] && exit 22
   echo "CURL telegram" >> "$FAKE_CURL_LOG"
 else
+  if [[ "${FAIL_WEBHOOK:-0}" == 1 ]]; then cat >/dev/null; exit 22; fi
   echo "CURL webhook" >> "$FAKE_CURL_LOG"
   cat >> "$FAKE_CURL_LOG"
 fi
@@ -107,14 +108,22 @@ expect "이상 없으면 정상" "$(has '✅ 상태: 정상')" 1
 
 # ── 상태 처리 ──
 rm -rf "$T/state"; : > "$FAKE_CURL_LOG"
-mkdir -p "$T/state/level.webhook"; fixture 55000000000   # 상태 파일 자리에 디렉터리를 둬 쓰기 실패를 만듦
+mkdir -p "$T/state/level.webhook.tmp"; fixture 55000000000   # 임시 파일 자리에 디렉터리를 둬 쓰기 실패를 만듦
 run check >/dev/null 2>&1 && st=0 || st=$?
 expect "상태 기록 불가: 종료 코드 1" "$st" 1
 expect "  보내지 않음 (기록 못 한 채 보내면 매번 중복)" "$(sent)" 0
-rm -rf "$T/state"; mkdir -p "$T/state"; echo "2026-11 50" > "$T/state/state"
+rm -rf "$T/state"; mkdir -p "$T/state"; echo "2026-11 50" > "$T/state/level.webhook"; fixture 85000000000
+FAIL_WEBHOOK=1 run check >/dev/null 2>&1 || true
+expect "전송 실패: 기존 채널 기록 보존" "$(cat "$T/state/level.webhook")" "2026-11 50"
+expect "  임시 파일 정리" "$(ls "$T/state" | grep -c tmp || true)" 0
+rm -rf "$T/state"; mkdir -p "$T/state"; echo "2026-11 50" > "$T/state/state"; fixture 55000000000
 run check >/dev/null
 expect "첫 버전 상태(state) 이어받기: 50% 재알림 없음" "$(sent)" 0
-fixture 85000000000; run check >/dev/null
+fixture 85000000000; FAIL_WEBHOOK=1 run check >/dev/null 2>&1 || true
+expect "  80% 전송 실패 뒤 빈 채널 파일이 남지 않음" "$([[ -e "$T/state/level.webhook" ]] && echo 있음 || echo 없음)" 없음
+sed -i 's/^ALERT_PCTS=.*/ALERT_PCTS="50"/' "$T/conf"; run check >/dev/null
+expect "  그 뒤에도 첫 버전 기록이 살아 있어 50% 재알림 없음" "$(sent)" 0
+sed -i 's/^ALERT_PCTS=.*/ALERT_PCTS="50 80"/' "$T/conf"; run check >/dev/null
 expect "  80% 는 알림" "$(sent)" 1
 rm -rf "$T/state"; sed -i 's/^ALERT_PCTS=.*/ALERT_PCTS="500 1000"/' "$T/conf"
 fixture 600000000000; run check >/dev/null
