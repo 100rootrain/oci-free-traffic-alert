@@ -112,6 +112,10 @@ mkdir -p "$T/state/level.webhook.tmp"; fixture 55000000000   # 임시 파일 자
 run check >/dev/null 2>&1 && st=0 || st=$?
 expect "상태 기록 불가: 종료 코드 1" "$st" 1
 expect "  보내지 않음 (기록 못 한 채 보내면 매번 중복)" "$(sent)" 0
+rm -rf "$T/state"; mkdir -p "$T/state/level.webhook"   # 최종 상태 경로가 디렉터리 → 보낸 뒤 교체가 실패하는 경우
+run check >/dev/null 2>&1 && st=0 || st=$?; run check >/dev/null 2>&1 || true
+expect "상태 경로가 디렉터리: 종료 코드 1" "$st" 1
+expect "  보내지 않음 (두 번 실행해도 0건)" "$(sent)" 0
 rm -rf "$T/state"; mkdir -p "$T/state"; echo "2026-11 50" > "$T/state/level.webhook"; fixture 85000000000
 FAIL_WEBHOOK=1 run check >/dev/null 2>&1 || true
 expect "전송 실패: 기존 채널 기록 보존" "$(cat "$T/state/level.webhook")" "2026-11 50"

@@ -154,8 +154,9 @@ deliver() {
       f="$STATE_DIR/$name.$ch" old=""
       if [[ -f "$f" ]]; then old=$(cat "$f"); elif [[ "$name" == level && -f "$STATE_DIR/state" ]]; then old=$(cat "$STATE_DIR/state"); fi
       newer "$key" "$old" || continue
-      if ! echo "$key" 2>/dev/null > "$f.tmp"; then
-        rm -f "$f.tmp" 2>/dev/null; echo "❌ 상태 파일에 쓸 수 없어 보내지 않습니다: $f.tmp" >&2; failed=1; continue
+      # 기존 경로가 디렉터리 등 파일이 아니면 보낸 뒤 교체(mv)가 실패해 매번 다시 보내게 되므로 미리 막는다.
+      if [[ -e "$f" && ! -f "$f" ]] || ! echo "$key" 2>/dev/null > "$f.tmp"; then
+        rm -f "$f.tmp" 2>/dev/null; echo "❌ 상태 파일에 쓸 수 없어 보내지 않습니다: $f" >&2; failed=1; continue
       fi
     fi
     if "send_$ch" "$text"; then
