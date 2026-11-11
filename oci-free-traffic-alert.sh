@@ -59,12 +59,13 @@ read -r MONTH_TX MONTH_RX DAY_TX DAY_RX YDAY_TX AVG7_TX <<<"$USAGE"   # 이력�
 #   월말 예상 = 이번 달 누적 + 7일 평균 × 남은 일수 (이력이 없으면 일평균 × 이번 달 일수)
 #   급증     = 7일 이력이 있고(평균 0 포함), 오늘 송신 ≥ 평균 × SPIKE_X 이며 SPIKE_MIN_GB 이상
 #   단계     = 이번 달 사용률이 넘어선 ALERT_PCTS 중 가장 큰 값 (없으면 0)
-IFS=$'\t' read -r PCT PROJ_PCT PROJ_OVER LEVEL SPIKE SPIKE_MSG S_MTX S_MRX S_DTX S_DRX S_LEFT S_PROJ S_AVG S_DOD <<<"$(
+CALC=$(
   awk -v mtx="$MONTH_TX" -v mrx="$MONTH_RX" -v dtx="$DAY_TX" -v drx="$DAY_RX" -v ytx="$YDAY_TX" -v avg="$AVG7_TX" \
       -v lim="$LIMIT_GB" -v pcts="$ALERT_PCTS" -v day="$DAY" -v dim="$DIM" -v sx="$SPIKE_X" -v smin="$SPIKE_MIN_GB" '
     function size(b) { return (b < 1e9) ? sprintf("%.1f MB", b / 1e6) : ((b < 1e12) ? sprintf("%.2f GB", b / 1e9) : sprintf("%.2f TB", b / 1e12)) }
     BEGIN {
       mtx += 0; mrx += 0; dtx += 0; drx += 0; ytx += 0; avg += 0; lim += 0; sx += 0; smin += 0
+      if (lim <= 0) { print "LIMIT_GB 는 0보다 커야 합니다" > "/dev/stderr"; exit 1 }
       L = lim * 1e9; pct = mtx / L * 100; left = (L > mtx) ? L - mtx : 0
       proj = (avg >= 0) ? mtx + avg * (dim - day) : mtx / day * dim
       level = 0; n = split(pcts, P, " ")
@@ -79,7 +80,8 @@ IFS=$'\t' read -r PCT PROJ_PCT PROJ_OVER LEVEL SPIKE SPIKE_MSG S_MTX S_MRX S_DTX
       else sdod = sprintf("%+.0f%% (어제 %s)", (dtx - ytx) / ytx * 100, size(ytx))
       printf "%.2f\t%.2f\t%d\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", pct, proj / L * 100, (proj > L), level, spike,
              smsg, size(mtx), size(mrx), size(dtx), size(drx), size(left), size(proj), savg, sdod
-    }')"
+    }') || die "사용량 계산 실패 — 설정값(LIMIT_GB·ALERT_PCTS·SPIKE_X·SPIKE_MIN_GB)을 확인하세요"
+IFS=$'\t' read -r PCT PROJ_PCT PROJ_OVER LEVEL SPIKE SPIKE_MSG S_MTX S_MRX S_DTX S_DRX S_LEFT S_PROJ S_AVG S_DOD <<<"$CALC"
 
 # 알림용 요약 3줄
 brief() {
@@ -128,18 +130,34 @@ CHANNELS=()
 if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then CHANNELS+=(telegram); fi
 if [[ -n "${WEBHOOK_URL:-}" ]]; then CHANNELS+=(webhook); fi
 
+# newer <새 키> <기록된 키>: 키는 "YYYY-MM 단계"(임계치) 또는 "YYYY-MM-DD"(급증).
+#   앞부분(월·날짜)이 더 늦거나, 같으면 단계가 숫자로 더 클 때 참.
+newer() {
+  local nk nl ok ol
+  read -r nk nl <<<"$1"; read -r ok ol <<<"$2"
+  [[ "$nk" > "$ok" ]] || { [[ "$nk" == "$ok" ]] && (( 10#${nl:-0} > 10#${ol:-0} )); }
+}
+
 # deliver <상태이름|""> <키> <본문>
-#   상태이름이 있으면 채널마다 기록된 키보다 새 키가 클 때만 보내고, 성공한 채널에만 키를 기록한다.
+#   상태이름이 있으면 채널마다 기록된 키보다 새 키가 newer 일 때만 보내고, 성공한 채널에만 키를 기록한다.
 #   → 한 채널이 실패해도 성공한 채널엔 다시 가지 않고, 실패한 채널만 다음 실행 때 재시도한다.
-#   키는 고정 폭(YYYY-MM 0LL, YYYY-MM-DD)이라 문자열 비교로 순서가 맞다.
+#   상태를 기록할 수 없으면 보내지 않는다 (기록 못 한 채 보내면 매번 다시 보내게 됨).
+#   첫 버전은 임계치 상태를 채널 구분 없이 STATE_DIR/state 에 같은 형식으로 남겼으므로,
+#   채널 파일이 아직 없으면 그 값을 이어받는다.
 deliver() {
-  local name=$1 key=$2 text=$3 ch f failed=0
+  local name=$1 key=$2 text=$3 ch f old failed=0
   (( ${#CHANNELS[@]} )) || die "알림 채널이 없습니다: $CONF 에 TELEGRAM_BOT_TOKEN·TELEGRAM_CHAT_ID 또는 WEBHOOK_URL 을 입력하세요"
   for ch in "${CHANNELS[@]}"; do
-    f="$STATE_DIR/$name.$ch"
-    if [[ -n "$name" ]] && ! [[ "$key" > "$(cat "$f" 2>/dev/null || true)" ]]; then continue; fi
+    if [[ -n "$name" ]]; then
+      f="$STATE_DIR/$name.$ch" old=""
+      if [[ -f "$f" ]]; then old=$(cat "$f"); elif [[ "$name" == level && -f "$STATE_DIR/state" ]]; then old=$(cat "$STATE_DIR/state"); fi
+      newer "$key" "$old" || continue
+      if ! : 2>/dev/null >> "$f"; then echo "❌ 상태 파일에 쓸 수 없어 보내지 않습니다: $f" >&2; failed=1; continue; fi
+    fi
     if "send_$ch" "$text"; then
-      if [[ -n "$name" ]]; then echo "$key" > "$f"; fi
+      if [[ -n "$name" ]] && ! echo "$key" 2>/dev/null > "$f"; then
+        echo "❌ $name → $ch 는 보냈지만 상태 기록 실패: $f (다음 실행 때 다시 보낼 수 있음)" >&2; failed=1; continue
+      fi
       echo "[$(date '+%F %T')] ${name:-report} → $ch 전송"
     else
       echo "❌ ${name:-report} → $ch 전송 실패 (check 는 다음 실행 때 다시 시도)" >&2; failed=1
@@ -164,7 +182,7 @@ case "$CMD" in
     if command -v flock >/dev/null; then flock -w 60 9 || die "다른 check 실행이 끝나지 않았습니다"; fi
     failed=0
     if (( LEVEL > 0 )); then
-      deliver level "$(printf '%s %03d' "${TODAY:0:7}" "$LEVEL")" "🚨 OCI 송신 트래픽 경고 [$HOST_LABEL]
+      deliver level "${TODAY:0:7} $LEVEL" "🚨 OCI 송신 트래픽 경고 [$HOST_LABEL]
 이번 달 송신량이 무료 한도의 ${LEVEL}%를 넘었습니다.
 $(brief)
 PAYG 계정은 무료 한도를 넘는 송신량부터 과금됩니다." || failed=1

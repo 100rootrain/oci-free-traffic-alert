@@ -66,7 +66,7 @@ expect "55% 재실행: 중복 알림 없음" "$(sent)" 1
 fixture 85000000000; run check >/dev/null
 expect "85%: 80% 알림 추가" "$(sent)" 2
 expect "80% 알림 문구" "$(grep -c '무료 한도의 80%' "$FAKE_CURL_LOG")" 1
-echo "2000-01 080" > "$T/state/level.webhook"; fixture 55000000000; run check >/dev/null
+echo "2000-01 80" > "$T/state/level.webhook"; fixture 55000000000; run check >/dev/null
 expect "새 달: 다시 알림" "$(sent)" 3
 
 # ── 리포트 ──
@@ -104,6 +104,26 @@ expect "이력 없음: 일평균으로 월말 예상" "$(has '월말 예상 송�
 expect "이력 없음: 7일 평균 수집 중" "$(has '최근 7일 평균: 데이터 수집 중')" 1
 expect "이력 없음: 전일 대비 수집 중" "$(has '전일 대비: 데이터 수집 중')" 1
 expect "이상 없으면 정상" "$(has '✅ 상태: 정상')" 1
+
+# ── 상태 처리 ──
+rm -rf "$T/state"; : > "$FAKE_CURL_LOG"
+mkdir -p "$T/state/level.webhook"; fixture 55000000000   # 상태 파일 자리에 디렉터리를 둬 쓰기 실패를 만듦
+run check >/dev/null 2>&1 && st=0 || st=$?
+expect "상태 기록 불가: 종료 코드 1" "$st" 1
+expect "  보내지 않음 (기록 못 한 채 보내면 매번 중복)" "$(sent)" 0
+rm -rf "$T/state"; mkdir -p "$T/state"; echo "2026-11 50" > "$T/state/state"
+run check >/dev/null
+expect "첫 버전 상태(state) 이어받기: 50% 재알림 없음" "$(sent)" 0
+fixture 85000000000; run check >/dev/null
+expect "  80% 는 알림" "$(sent)" 1
+rm -rf "$T/state"; sed -i 's/^ALERT_PCTS=.*/ALERT_PCTS="500 1000"/' "$T/conf"
+fixture 600000000000; run check >/dev/null
+fixture 1100000000000; run check >/dev/null
+expect "네 자리 임계치: 500% 다음 1000% 도 알림" "$(sent)" 3
+sed -i 's/^ALERT_PCTS=.*/ALERT_PCTS="50 80"/; s/^LIMIT_GB=.*/LIMIT_GB=0/' "$T/conf"
+run status >/dev/null 2>&1 && st=0 || st=$?
+expect "LIMIT_GB=0: 빈 리포트 대신 실패" "$st" 1
+sed -i 's/^LIMIT_GB=.*/LIMIT_GB=100/' "$T/conf"
 
 # ── 채널 일부 실패: 성공한 채널엔 다시 안 보내고 실패한 채널만 재시도 ──
 rm -rf "$T/state"; : > "$FAKE_CURL_LOG"
