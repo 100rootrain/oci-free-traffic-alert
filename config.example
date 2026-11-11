@@ -1,0 +1,23 @@
+# oci-free-traffic-alert 설정 — /etc/oci-free-traffic-alert.conf (chmod 600, 레포에 올리지 마세요)
+# 알림 채널은 하나 이상 입력하세요. 둘 다 입력하면 둘 다 보냅니다.
+
+# 텔레그램: @BotFather 로 만든 봇 토큰과 받을 채팅 ID
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+
+# 웹훅: {"text": "..."} JSON 을 받는 주소
+#   Slack Incoming Webhook, Google Chat 웹훅은 주소 그대로,
+#   Discord 웹훅은 주소 끝에 /slack 을 붙여서 입력
+WEBHOOK_URL=
+
+# 알림에 표시할 서버 이름 (기본: hostname)
+#HOST_LABEL=my-oci-server
+
+# 감시할 네트워크 인터페이스 (기본: 기본 라우트 인터페이스 자동 감지)
+#IFACE=enp0s6
+
+# 월 무료 송신 한도(GB). OCI 는 10TB — 1TB=1000GB 로 잡아 조금 일찍 경고합니다.
+#LIMIT_GB=10000
+
+# 이번 달 송신량이 이 비율(%)을 처음 넘을 때마다 한 번씩 알림 (정수, 공백 구분)
+#ALERT_PCTS="50 80 95"
