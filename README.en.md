@@ -58,6 +58,7 @@ vnstat needs about 5 minutes to collect its first data after install.
 - **Month-end projection** = month-to-date + 7-day average × remaining days (falls back to the daily average so far when there is no history). If it exceeds the allowance, the report says so.
 - **7-day average** covers the 7 days before today.
 - History comes from vnstat itself (by default 62 days of daily and 25 months of monthly data); no database is needed.
+- With both channels configured, if one fails, the channel that succeeded is not sent the alert again; only the failed one is retried on the next `check`.
 
 - Cron uses the server time zone (UTC on default OCI images).
 - Logs: `journalctl -t oci-free-traffic-alert`.

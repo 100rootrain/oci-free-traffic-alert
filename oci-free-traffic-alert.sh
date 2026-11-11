@@ -53,80 +53,99 @@ USAGE=$(jq -er --arg today "$TODAY" --arg yday "$(date -d "$TODAY -1 day" +%F)" 
      ([$days[] | select(.d == $yday) | .tx] | first // -1),
      (if ($week | length) > 0 then ($week | add) / ($week | length) else -1 end)]
   | map(tostring) | join(" ")' <<<"$JSON") || die "vnstat JSON 해석 실패"
-read -r MONTH_TX MONTH_RX DAY_TX DAY_RX YDAY_TX AVG7_TX <<<"$USAGE"   # 없는 값은 -1
+read -r MONTH_TX MONTH_RX DAY_TX DAY_RX YDAY_TX AVG7_TX <<<"$USAGE"   # 이력이 없으면 YDAY_TX·AVG7_TX = -1
 
-# awk 계산·서식. 사용량 변수를 모두 넘겨 두고 $1 의 문장을 실행한다.
-#   pct   이번 달 사용률(%)
-#   proj  월말 예상 송신 = 이번 달 누적 + 7일 평균 × 남은 일수 (이력이 없으면 일평균 × 이번 달 일수)
-#   ratio 오늘 송신 ÷ 7일 평균
-calc() {
+# ── 계산: 수치와 문구를 awk 한 번에 구해 리포트·알림이 같은 값을 쓴다 ───────────
+#   월말 예상 = 이번 달 누적 + 7일 평균 × 남은 일수 (이력이 없으면 일평균 × 이번 달 일수)
+#   급증     = 7일 이력이 있고(평균 0 포함), 오늘 송신 ≥ 평균 × SPIKE_X 이며 SPIKE_MIN_GB 이상
+#   단계     = 이번 달 사용률이 넘어선 ALERT_PCTS 중 가장 큰 값 (없으면 0)
+IFS=$'\t' read -r PCT PROJ_PCT PROJ_OVER LEVEL SPIKE SPIKE_MSG S_MTX S_MRX S_DTX S_DRX S_LEFT S_PROJ S_AVG S_DOD <<<"$(
   awk -v mtx="$MONTH_TX" -v mrx="$MONTH_RX" -v dtx="$DAY_TX" -v drx="$DAY_RX" -v ytx="$YDAY_TX" -v avg="$AVG7_TX" \
-      -v lim="$LIMIT_GB" -v day="$DAY" -v dim="$DIM" -v sx="$SPIKE_X" -v smin="$SPIKE_MIN_GB" '
+      -v lim="$LIMIT_GB" -v pcts="$ALERT_PCTS" -v day="$DAY" -v dim="$DIM" -v sx="$SPIKE_X" -v smin="$SPIKE_MIN_GB" '
     function size(b) { return (b < 1e9) ? sprintf("%.1f MB", b / 1e6) : ((b < 1e12) ? sprintf("%.2f GB", b / 1e9) : sprintf("%.2f TB", b / 1e12)) }
     BEGIN {
       mtx += 0; mrx += 0; dtx += 0; drx += 0; ytx += 0; avg += 0; lim += 0; sx += 0; smin += 0
-      L = lim * 1e9; pct = mtx / L * 100
+      L = lim * 1e9; pct = mtx / L * 100; left = (L > mtx) ? L - mtx : 0
       proj = (avg >= 0) ? mtx + avg * (dim - day) : mtx / day * dim
-      ratio = (avg > 0) ? dtx / avg : 0
-      '"$1"'
-    }'
-}
-
-PCT=$(calc 'printf "%.2f", pct')
-RATIO=$(calc 'printf "%.1f", ratio')
-SPIKE=$(calc 'print ((sx > 0 && ratio >= sx && dtx >= smin * 1e9) ? 1 : 0)')
-PROJ_OVER=$(calc 'print ((proj >= L) ? 1 : 0)')
-
-# 지금 넘어선 임계치 중 가장 큰 값 (없으면 0)
-LEVEL=0
-for p in $ALERT_PCTS; do
-  if awk -v a="$PCT" -v p="$p" 'BEGIN { exit !(a >= p) }' && (( p > LEVEL )); then LEVEL=$p; fi
-done
+      level = 0; n = split(pcts, P, " ")
+      for (i = 1; i <= n; i++) if (pct >= P[i] + 0 && P[i] + 0 > level) level = P[i] + 0
+      spike = (sx > 0 && avg >= 0 && dtx >= avg * sx && dtx >= smin * 1e9)
+      if (!spike) smsg = "-"
+      else if (avg > 0) smsg = sprintf("오늘 송신이 최근 7일 평균의 %.1f배입니다", dtx / avg)
+      else smsg = sprintf("최근 7일 송신이 없었는데 오늘 %s를 보냈습니다", size(dtx))
+      savg = (avg >= 0) ? size(avg) "/일" : "데이터 수집 중"
+      if (ytx < 0) sdod = "데이터 수집 중"
+      else if (ytx == 0) sdod = "- (어제 0)"
+      else sdod = sprintf("%+.0f%% (어제 %s)", (dtx - ytx) / ytx * 100, size(ytx))
+      printf "%.2f\t%.2f\t%d\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", pct, proj / L * 100, (proj > L), level, spike,
+             smsg, size(mtx), size(mrx), size(dtx), size(drx), size(left), size(proj), savg, sdod
+    }')"
 
 # 알림용 요약 3줄
 brief() {
-  calc 'printf "• 이번 달 송신: %s (무료 한도의 %.2f%%)\n• 오늘 송신: %s\n• 월말 예상 송신: %s (%.2f%%)\n",
-        size(mtx), pct, size(dtx), size(proj), proj / L * 100'
+  printf '%s\n' "• 이번 달 송신: $S_MTX (무료 한도의 ${PCT}%)" "• 오늘 송신: $S_DTX" "• 월말 예상 송신: $S_PROJ (${PROJ_PCT}%)"
 }
 
 report_text() {
   local -a st=()
   (( LEVEL > 0 )) && st+=("⚠️ 무료 한도의 ${LEVEL}% 이상 사용")
   (( PROJ_OVER )) && st+=("🚨 이 추세면 월말에 무료 한도를 넘습니다")
-  (( SPIKE )) && st+=("⚡ 오늘 송신이 최근 7일 평균의 ${RATIO}배")
+  (( SPIKE )) && st+=("⚡ $SPIKE_MSG")
   (( ${#st[@]} )) || st=("✅ 상태: 정상")
+  cat <<EOF
+📊 OCI 트래픽 일일 리포트 [$HOST_LABEL]
+$TODAY $(date +%H:%M) 기준
 
-  echo "📊 OCI 트래픽 일일 리포트 [$HOST_LABEL]"
-  echo "$TODAY $(date +%H:%M) 기준"
-  echo
-  calc '
-    left = L - mtx; if (left < 0) left = 0
-    printf "📡 오늘의 네트워크\n• 송신 TX: %s\n• 수신 RX: %s\n\n", size(dtx), size(drx)
-    printf "🗓 이번 달 사용량\n• 송신 TX: %s\n• 수신 RX: %s (무료)\n• 무료 한도 사용률: %.2f%%\n• 남은 송신 한도: 약 %s\n\n",
-           size(mtx), size(mrx), pct, size(left)
-    printf "📈 트래픽 분석\n• 월말 예상 송신: %s (%.2f%%)\n", size(proj), proj / L * 100
-    if (avg >= 0) printf "• 최근 7일 평균: %s/일\n", size(avg); else print "• 최근 7일 평균: 데이터 수집 중"
-    if (ytx < 0) print "• 전일 대비: 데이터 수집 중"
-    else if (ytx == 0) print "• 전일 대비: - (어제 0)"
-    else printf "• 전일 대비: %+.0f%% (어제 %s)\n", (dtx - ytx) / ytx * 100, size(ytx)'
-  echo
+📡 오늘의 네트워크
+• 송신 TX: $S_DTX
+• 수신 RX: $S_DRX
+
+🗓 이번 달 사용량
+• 송신 TX: $S_MTX
+• 수신 RX: $S_MRX (무료)
+• 무료 한도 사용률: ${PCT}%
+• 남은 송신 한도: 약 $S_LEFT
+
+📈 트래픽 분석
+• 월말 예상 송신: $S_PROJ (${PROJ_PCT}%)
+• 최근 7일 평균: $S_AVG
+• 전일 대비: $S_DOD
+
+EOF
   printf '%s\n' "${st[@]}"
 }
 
-# 설정된 채널(텔레그램·웹훅) 모두로 전송. 하나라도 실패하면 실패.
-notify() {
-  local text="$1" sent=0
-  if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
-    curl -fsS --max-time 15 -o /dev/null "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-      --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${text}" || return 1
-    sent=1
-  fi
-  if [[ -n "${WEBHOOK_URL:-}" ]]; then
-    jq -n --arg t "$text" '{text: $t}' \
-      | curl -fsS --max-time 15 -o /dev/null -H 'Content-Type: application/json' -d @- "$WEBHOOK_URL" || return 1
-    sent=1
-  fi
-  (( sent )) || { echo "알림 채널이 없습니다: $CONF 에 TELEGRAM_BOT_TOKEN·TELEGRAM_CHAT_ID 또는 WEBHOOK_URL 을 입력하세요" >&2; return 1; }
+# ── 전송 ──────────────────────────────────────────────────────────────
+send_telegram() {
+  curl -fsS --max-time 15 -o /dev/null "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=$1"
+}
+send_webhook() {
+  jq -n --arg t "$1" '{text: $t}' \
+    | curl -fsS --max-time 15 -o /dev/null -H 'Content-Type: application/json' -d @- "$WEBHOOK_URL"
+}
+CHANNELS=()
+if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then CHANNELS+=(telegram); fi
+if [[ -n "${WEBHOOK_URL:-}" ]]; then CHANNELS+=(webhook); fi
+
+# deliver <상태이름|""> <키> <본문>
+#   상태이름이 있으면 채널마다 기록된 키보다 새 키가 클 때만 보내고, 성공한 채널에만 키를 기록한다.
+#   → 한 채널이 실패해도 성공한 채널엔 다시 가지 않고, 실패한 채널만 다음 실행 때 재시도한다.
+#   키는 고정 폭(YYYY-MM 0LL, YYYY-MM-DD)이라 문자열 비교로 순서가 맞다.
+deliver() {
+  local name=$1 key=$2 text=$3 ch f failed=0
+  (( ${#CHANNELS[@]} )) || die "알림 채널이 없습니다: $CONF 에 TELEGRAM_BOT_TOKEN·TELEGRAM_CHAT_ID 또는 WEBHOOK_URL 을 입력하세요"
+  for ch in "${CHANNELS[@]}"; do
+    f="$STATE_DIR/$name.$ch"
+    if [[ -n "$name" ]] && ! [[ "$key" > "$(cat "$f" 2>/dev/null || true)" ]]; then continue; fi
+    if "send_$ch" "$text"; then
+      if [[ -n "$name" ]]; then echo "$key" > "$f"; fi
+      echo "[$(date '+%F %T')] ${name:-report} → $ch 전송"
+    else
+      echo "❌ ${name:-report} → $ch 전송 실패 (check 는 다음 실행 때 다시 시도)" >&2; failed=1
+    fi
+  done
+  return "$failed"
 }
 
 case "$CMD" in
@@ -135,30 +154,27 @@ case "$CMD" in
     report_text
     ;;
   report)
-    notify "$(report_text)" || die "알림 전송 실패"
-    echo "[$(date '+%F %T')] report sent (${PCT}%)"
+    deliver "" "" "$(report_text)"
     ;;
   check)
     mkdir -p "$STATE_DIR"
-    month=${TODAY:0:7} prev_month="" prev_level=0
-    if [[ -f "$STATE_DIR/state" ]]; then read -r prev_month prev_level < "$STATE_DIR/state" || true; fi
-    [[ "$prev_month" == "$month" ]] || prev_level=0   # 달이 바뀌면 처음부터 다시 알림
-    if (( LEVEL > prev_level )); then
-      notify "🚨 OCI 송신 트래픽 경고 [$HOST_LABEL]
+    # 상태 확인 → 전송 → 기록을 한 번에 하나씩 (수동 실행과 cron 이 겹쳐도 중복 전송 방지).
+    # flock 은 Linux(util-linux) 기본 명령. 없는 개발 환경에서만 잠금 없이 진행.
+    exec 9>"$STATE_DIR/lock"
+    if command -v flock >/dev/null; then flock -w 60 9 || die "다른 check 실행이 끝나지 않았습니다"; fi
+    failed=0
+    if (( LEVEL > 0 )); then
+      deliver level "$(printf '%s %03d' "${TODAY:0:7}" "$LEVEL")" "🚨 OCI 송신 트래픽 경고 [$HOST_LABEL]
 이번 달 송신량이 무료 한도의 ${LEVEL}%를 넘었습니다.
 $(brief)
-PAYG 계정은 무료 한도를 넘는 송신량부터 과금됩니다." || die "알림 전송 실패 — 다음 실행 때 다시 시도합니다"
-      echo "$month $LEVEL" > "$STATE_DIR/state"
-      echo "[$(date '+%F %T')] 임계치 알림 (${LEVEL}%, 현재 ${PCT}%)"
+PAYG 계정은 무료 한도를 넘는 송신량부터 과금됩니다." || failed=1
     fi
-    # 급증 알림은 하루 1번
-    if (( SPIKE )) && [[ "$(cat "$STATE_DIR/spike" 2>/dev/null || true)" != "$TODAY" ]]; then
-      notify "⚡ OCI 송신 트래픽 급증 [$HOST_LABEL]
-오늘 송신이 최근 7일 평균의 ${RATIO}배입니다.
+    if (( SPIKE )); then   # 하루 한 번
+      deliver spike "$TODAY" "⚡ OCI 송신 트래픽 급증 [$HOST_LABEL]
+${SPIKE_MSG}.
 $(brief)
-어떤 프로세스가 보내는지 확인해 보세요 (예: sudo nethogs, sudo iftop)." || die "알림 전송 실패 — 다음 실행 때 다시 시도합니다"
-      echo "$TODAY" > "$STATE_DIR/spike"
-      echo "[$(date '+%F %T')] 급증 알림 (${RATIO}배)"
+어떤 프로세스가 보내는지 확인해 보세요 (예: sudo nethogs, sudo iftop)." || failed=1
     fi
+    exit "$failed"
     ;;
 esac
