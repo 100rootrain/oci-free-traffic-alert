@@ -21,3 +21,8 @@ WEBHOOK_URL=
 
 # 이번 달 송신량이 이 비율(%)을 처음 넘을 때마다 한 번씩 알림 (정수, 공백 구분)
 #ALERT_PCTS="50 80 95"
+
+# 급증 알림: 오늘 송신이 최근 7일 평균의 SPIKE_X 배 이상이고 SPIKE_MIN_GB 이상이면 하루 한 번 알림
+# (SPIKE_X=0 이면 끔)
+#SPIKE_X=3
+#SPIKE_MIN_GB=10

@@ -2,7 +2,7 @@
 
 [![README: 한국어](https://img.shields.io/badge/README-%ED%95%9C%EA%B5%AD%EC%96%B4-blue)](README.md)
 
-Watches this month's **outbound (egress) traffic** on an Oracle Cloud (OCI) free-tier server against the 10 TB/month free allowance, and alerts you via Telegram or a webhook (Slack, Discord, Google Chat). Two shell scripts and cron, nothing else.
+Watches this month's **outbound (egress) traffic** on an Oracle Cloud (OCI) free-tier server against the 10 TB/month free allowance, and alerts you via Telegram or a webhook (Slack, Discord, Google Chat). The daily report adds a month-end projection, a 7-day average and a day-over-day change, and you get an immediate alert when usage nears the limit or suddenly spikes. Two shell scripts and cron, nothing else.
 
 > Alert messages are written in Korean.
 
@@ -10,7 +10,7 @@ Watches this month's **outbound (egress) traffic** on an Oracle Cloud (OCI) free
 
 - On a Pay As You Go (PAYG) account, egress beyond the free allowance is billed.
 - OCI quota policies cannot cap egress, and Budget alerts only fire **after** charges appear.
-- A1 instances get 1 Gbps per OCPU, so a 2-OCPU server sending at full speed could in theory pass 10 TB in about half a day. That is why thresholds are checked **every 10 minutes**, not only in the daily report.
+- A1 instances get 1 Gbps per OCPU, so a 2-OCPU server sending at full speed could in theory pass 10 TB in about half a day. That is why thresholds and spikes are checked **every 10 minutes**, not only in the daily report.
 
 ## Requirements
 
@@ -37,7 +37,7 @@ TELEGRAM_CHAT_ID=123456789         # see https://api.telegram.org/bot<token>/get
 WEBHOOK_URL=https://hooks.slack.com/services/...   # Discord: append /slack to the webhook URL
 ```
 
-Optional: `HOST_LABEL` (default `hostname`), `IFACE` (default: interface of the default route), `LIMIT_GB` (default `10000`), `ALERT_PCTS` (default `"50 80 95"`).
+Optional: `HOST_LABEL` (default `hostname`), `IFACE` (default: interface of the default route), `LIMIT_GB` (default `10000`), `ALERT_PCTS` (default `"50 80 95"`), `SPIKE_X` (default `3`, `0` disables spike alerts), `SPIKE_MIN_GB` (default `10`).
 
 ## Test
 
@@ -52,8 +52,13 @@ vnstat needs about 5 minutes to collect its first data after install.
 
 | When | Command | What it does |
 |---|---|---|
-| Every 10 min | `check` | Alerts only when this month's egress **newly** crosses 50% / 80% / 95%; each level fires once per month |
-| Daily 23:55 | `report` | Sends a summary of this month and today |
+| Every 10 min | `check` | (1) Alerts when this month's egress **newly** crosses 50% / 80% / 95% (each level once per month). (2) Spike alert when today's egress is at least 3× the 7-day average and at least 10 GB (once per day) |
+| Daily 23:55 | `report` | Sends today's and this month's usage plus the analysis |
+
+- **Month-end projection** = month-to-date + 7-day average × remaining days (falls back to the daily average so far when there is no history). If it exceeds the allowance, the report says so.
+- **7-day average** covers the 7 days before today.
+- History comes from vnstat itself (by default 62 days of daily and 25 months of monthly data); no database is needed.
+- With both channels configured, if one fails, the channel that succeeded is not sent the alert again; only the failed one is retried on the next `check`.
 
 - Cron uses the server time zone (UTC on default OCI images).
 - Logs: `journalctl -t oci-free-traffic-alert`.
@@ -79,7 +84,7 @@ sudo rm -r /var/lib/oci-free-traffic-alert
 ## Development
 
 ```bash
-bash tests/test.sh   # fakes vnstat and curl to verify alert behavior (needs bash, jq, awk)
+bash tests/test.sh   # fakes vnstat and curl to verify alerts and analysis (needs bash, jq, awk, GNU date)
 ```
 
 ## License
